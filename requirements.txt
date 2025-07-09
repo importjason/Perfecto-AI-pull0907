@@ -1,0 +1,13 @@
+streamlit
+langchain
+langchain-core
+langchain-google-genai
+langchain-openai
+langchain-experimental
+python-dotenv
+faiss-cpu
+llama-parse
+tiktoken
+sentence-transformers
+unstructured
+selenium
