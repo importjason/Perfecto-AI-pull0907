@@ -108,15 +108,19 @@ def build_ssml_log_file(
 def _log_ssml_preview(line: str, provider: str, voice_template: str, polly_voice_key: str, subtitle_lang: str):
     """
     단일 라인 SSML 미리보기 로그.
-    배치 함수가 JSON 배열을 반환하므로, 한 줄만 넣고 [0]번째 결과를 꺼낸다.
+    - 자막용 텍스트(line)는 원문 그대로 출력.
+    - 발화용은 koreanize_if_english(line) 후 SSML 변환.
     """
     try:
-        ssml_list = convert_lines_to_ssml_batch([koreanize_if_english(line)])
+        orig_text = line.strip()
+        ssml_input = koreanize_if_english(orig_text)  # 음성용 변환
+        ssml_list = convert_lines_to_ssml_batch([ssml_input])
         ssml = ssml_list[0] if ssml_list else ""
-        st.write(f"🧪 [SSML 미리보기] {line}")
-        st.code(ssml, language="xml")
+        st.write(f"🧪 [SSML 미리보기] {orig_text}")  # ✅ 자막은 원문 그대로
+        st.code(ssml, language="xml")               # ✅ SSML은 발화용
     except Exception as e:
         st.write(f"⚠️ SSML 미리보기 생성 실패: {e}")
+
 
 
 FPS = 30
