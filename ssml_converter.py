@@ -11,7 +11,43 @@ try:
     from deep_translator import GoogleTranslator
 except Exception:
     GoogleTranslator = None
+# ssml_converter.py
+import json
+from typing import List
+from . import _complete_with_any_llm, SSML_PROMPT  # 기존에 쓰던 것 불러오기
+
+def convert_lines_to_ssml_batch(lines: List[str]) -> List[str]:
+    """
+    라인 배열 전체를 LLM에 한 번만 넣고,
+    동일 길이의 SSML 배열(JSON)로 반환받는다.
+    """
+    if not lines:
+        return []
+
+    prompt = f"""
+{SSML_PROMPT}
+
+[입력/출력 규칙]
+- 입력은 JSON 배열 lines: ["문장1","문장2",...]
+- 출력은 JSON 배열 ssml_list: ["<speak>...</speak>", ...]
+- 배열 길이와 순서를 반드시 동일하게 유지할 것
+- 마크다운/설명/주석 금지, 오직 JSON만 출력
+
+입력(JSON):
+{json.dumps({"lines": lines}, ensure_ascii=False)}
+"""
+
+    raw = _complete_with_any_llm(prompt)
+    ssml_list = json.loads(raw)
+
+    if not isinstance(ssml_list, list):
+        raise ValueError("❌ SSML 변환 결과가 list가 아님")
+    if len(ssml_list) != len(lines):
+        raise ValueError(f"❌ 길이 불일치: 입력={len(lines)} vs 출력={len(ssml_list)}")
+
+    return ssml_list
     
+
 def _looks_english(text: str) -> bool:
     if not text: return False
     en = len(re.findall(r"[A-Za-z]", text))
@@ -174,12 +210,6 @@ SSML_PROMPT = """역할: 너는 한국어 대본을 숏폼용 Amazon Polly SSML�
 - 각 문장의 마지막 prosody 텍스트가 원문 마지막 어미와 ‘완전히 동일’한가?
 - 재작성/치환/어미 변경 없이 원문 부분문자열로만 구성했는가?
 - 물음표/쉼표 외의 마침표/느낌표/줄임표를 쓰지 않았는가?
-
-[입력 대본]
-{{USER_SCRIPT}}
-
-[출력]
-(SSML만 출력)
 """
 
 def _complete_with_any_llm(prompt: str) -> str | None:
