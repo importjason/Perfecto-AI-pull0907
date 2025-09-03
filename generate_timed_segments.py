@@ -20,27 +20,6 @@ def lock_oneliner_if_short(text: str, threshold: int = 12) -> str:
         return (text or "").replace(" ", NBSP)
     return text
 
-def _split_script_by_llm_breath(script_text: str) -> list[str]:
-    """
-    스크립트를 문단별로 쪼갠 뒤, 각 문단을 LLM 브레스 라인들로 확장.
-    반환: 최종 TTS/세그먼트용 '한 줄씩' 리스트(빈 줄 제거).
-    """
-    blocks = [b.strip() for b in re.split(r"\n{2,}", script_text or "") if b.strip()]
-    lines: list[str] = []
-    for b in blocks:
-        try:
-            parts = [ln for ln in breath_linebreaks(b) if ln.strip()]
-        except Exception:
-            parts = [b]
-        lines.extend(parts)
-    return lines or [script_text.strip()]
-
-def split_script_to_lines(script_text, mode="llm"):
-    """항상 LLM 브레스 분절을 사용한다."""
-    text = script_text or ""
-    lines = breath_linebreaks(text)  # LLM 호출
-    return [ln.strip() for ln in lines if ln.strip()]
-
 def _drop_special_except_q(text: str) -> str:
     # 한글/영문/숫자/공백/물음표만 남김
     return re.sub(r"[^0-9A-Za-z\uac00-\ud7a3?\s]", "", text or "")
