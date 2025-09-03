@@ -19,7 +19,7 @@ from video_maker import (
     add_subtitles_to_video,
     create_dark_text_video
 )
-from ssml_converter import convert_line_to_ssml, breath_linebreaks, koreanize_if_english
+from ssml_converter import convert_lines_to_ssml_batch, breath_linebreaks_batch, koreanize_if_english
 from deep_translator import GoogleTranslator
 from file_handler import get_documents_from_files
 from upload import upload_to_youtube
@@ -1207,18 +1207,16 @@ with st.sidebar:
                         st.session_state["_used_br_lines"]      = sentence_lines[:]   # 브레스 라인 그대로
                         
                         segments, audio_clips, ass_path = generate_subtitle_from_script(
-                            script_text=script_text_for_tts,               
-                            ass_path=os.path.join("assets", "generated_subtitle.ass"),
-                            full_audio_file_path=audio_path,
-                            provider=provider,
-                            template=tmpl,
-                            polly_voice_key=st.session_state.selected_polly_voice_key,
-                            subtitle_lang="ko",
-                            translate_only_if_english=False,
-                            tts_lang=st.session_state.selected_tts_lang,
-                            split_mode="newline",                       
-                            strip_trailing_punct_last=False
+                            script_text,
+                            ass_path,
+                            provider=tts_provider,
+                            template=voice_template,
+                            polly_voice_key=polly_voice_key,
+                            subtitle_lang=subtitle_lang,
+                            translate_only_if_english=translate_only_if_english,
+                            strip_trailing_punct_last=True
                         )
+
                         # === SSML 변환 '후' (실사용본) ===
                         try:
                             # segments 각 요소에 ssml이 들어오는 구조면 이 리스트가 채워집니다.
