@@ -1191,7 +1191,6 @@ with st.sidebar:
                         tmpl = st.session_state.selected_tts_template if provider == "elevenlabs" else st.session_state.selected_polly_voice_key
                         
                         script_text = koreanize_if_english(final_script_for_video)
-                        sentence_lines = breath_linebreaks(script_text, honor_newlines=False, log=False)
                         script_text_for_tts = "\n".join(sentence_lines)
                         
                         # ✅ 토큰 없이 로그 만들 수 있도록 세션에 저장
