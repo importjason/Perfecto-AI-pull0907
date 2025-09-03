@@ -14,8 +14,39 @@ except Exception:
 # ssml_converter.py
 import json
 from typing import List
-from . import _complete_with_any_llm, SSML_PROMPT  # 기존에 쓰던 것 불러오기
+from . import _complete_with_any_llm, BREATH_PROMPT  # 기존에 있던 것 불러오기
 
+def breath_linebreaks_batch(script_text: str) -> List[str]:
+    """
+    전체 대본을 한 번에 넣고,
+    분절된 라인 배열(JSON)로 반환.
+    """
+    if not (script_text or "").strip():
+        return []
+
+    prompt = f"""
+{BREATH_PROMPT}
+
+[입력/출력 규칙]
+- 입력: 전체 대본 1개 (개행 포함 가능).
+- 출력: JSON 배열 lines: ["문장1","문장2",...]
+- 배열 길이/순서를 반드시 지킬 것.
+- 빈 요소 제거.
+- 마크다운/설명/주석 없이 오직 JSON만 출력.
+
+입력:
+<<<SCRIPT
+{script_text}
+SCRIPT>>>
+"""
+
+    raw = _complete_with_any_llm(prompt)
+    lines = json.loads(raw)
+
+    if not isinstance(lines, list):
+        raise ValueError("❌ 분절 결과가 list가 아님")
+    return [ln.strip() for ln in lines if isinstance(ln, str) and ln.strip()]
+    
 def convert_lines_to_ssml_batch(lines: List[str]) -> List[str]:
     """
     라인 배열 전체를 LLM에 한 번만 넣고,
@@ -161,12 +192,6 @@ BREATH_PROMPT = """역할: 너는 한국어 대본의 호흡(브레스) 라인�
 예) 지구에서 생명체는 살아남을수 없습니다 ← 한 줄 유지.
 
 명사구/조사 단위: 명사구 내부나 조사 바로 앞·뒤에서 어색하게 끊지 않는다.
-
-[입력]
-{{TEXT}}
-
-[출력]
-라인브레이크가 적용된 텍스트만 출력. 맨 앞·뒤 불필요한 빈 줄 금지.
 """
 
 SSML_PROMPT = """역할: 너는 한국어 대본을 숏폼용 Amazon Polly SSML로 변환하는 변환기다.
