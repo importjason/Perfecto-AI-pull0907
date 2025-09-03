@@ -47,16 +47,14 @@ VIDEO_TEMPLATE = "영상(영어보이스+한국어자막·가운데)"
 DEFAULT_BGM = "assets/[BGM] 힙합 비트 신나는 음악  무료브금  HYP-Show Me - HYP MUSIC - BGM Design.mp3"
 
 # ---------- 유틸 ----------
-def _split_script_for_tts(script_text: str, mode="llm") -> list[str]:
-    script_text = (script_text or "").strip()
-    if mode == "newline":
-        return [ln.strip() for ln in script_text.splitlines() if ln.strip()]
-    # 기본: LLM 호흡 분절
-    return breath_linebreaks(koreanize_if_english(script_text))
+def _split_script_for_tts(script_text: str) -> list[str]:
+    """
+    전체 대본을 LLM에 한 번 전달해 분절된 라인 배열을 받아온다.
+    """
+    text = script_text or ""
+    lines = breath_linebreaks_batch(text)  # ✅ 배치용 함수 사용
+    return [ln.strip() for ln in lines if ln.strip()]
 
-from io import BytesIO, StringIO
-import importlib
-import pandas as pd
 
 # === 기존 build_ssml_log_file 대체 ===
 def build_ssml_log_file(
@@ -107,29 +105,19 @@ def build_ssml_log_file(
     csv_bytes = sbuf.getvalue().encode("utf-8-sig")
     return csv_bytes, "csv", "text/csv"
 
-def _log_ssml_preview(orig_lines, generated_ssml_lines=None, title="SSML 변환 로그"):
+def _log_ssml_preview(line: str, provider: str, voice_template: str, polly_voice_key: str, subtitle_lang: str):
     """
-    원문 ↔ 변환된 SSML을 나란히 보여주는 디버그 로그.
-    - Streamlit UI(Expander + code)와 콘솔(print) 모두 출력
-    - generated_ssml_lines가 없으면 convert_line_to_ssml()로 미리보기 생성
+    단일 라인 SSML 미리보기 로그.
+    배치 함수가 JSON 배열을 반환하므로, 한 줄만 넣고 [0]번째 결과를 꺼낸다.
     """
     try:
-        import streamlit as st
-        with st.expander(f"🧪 {title}", expanded=False):
-            for i, line in enumerate(orig_lines, 1):
-                st.markdown(f"**{i}. 원문**: {line}")
-                ssml = (generated_ssml_lines[i-1]
-                        if (generated_ssml_lines and i-1 < len(generated_ssml_lines))
-                        else convert_line_to_ssml(line))
-                st.code(ssml, language="xml")
-    except Exception:
-        print(f"[SSML] {title}")
-        for i, line in enumerate(orig_lines, 1):
-            ssml = (generated_ssml_lines[i-1]
-                    if (generated_ssml_lines and i-1 < len(generated_ssml_lines))
-                    else convert_line_to_ssml(line))
-            print(f"L{i:02d} ORIG: {line}")
-            print(f"L{i:02d} SSML: {ssml}")
+        ssml_list = convert_lines_to_ssml_batch([koreanize_if_english(line)])
+        ssml = ssml_list[0] if ssml_list else ""
+        st.write(f"🧪 [SSML 미리보기] {line}")
+        st.code(ssml, language="xml")
+    except Exception as e:
+        st.write(f"⚠️ SSML 미리보기 생성 실패: {e}")
+
 
 FPS = 30
 
