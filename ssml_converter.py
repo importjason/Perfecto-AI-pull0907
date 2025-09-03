@@ -3,7 +3,7 @@ import re
 from html import escape as _xml_escape
 
 try:
-    from llm_utils import complete_text  # 존재하면 활용 
+    from llm_utils import complete_text  # 존재하면 활용
 except Exception:
     complete_text = None
 
@@ -11,74 +11,7 @@ try:
     from deep_translator import GoogleTranslator
 except Exception:
     GoogleTranslator = None
-# ssml_converter.py
-import json
-from typing import List
-from . import _complete_with_any_llm, BREATH_PROMPT  # 기존에 있던 것 불러오기
-
-def breath_linebreaks_batch(script_text: str) -> List[str]:
-    """
-    전체 대본을 한 번에 넣고,
-    분절된 라인 배열(JSON)로 반환.
-    """
-    if not (script_text or "").strip():
-        return []
-
-    prompt = f"""
-{BREATH_PROMPT}
-
-[입력/출력 규칙]
-- 입력: 전체 대본 1개 (개행 포함 가능).
-- 출력: JSON 배열 lines: ["문장1","문장2",...]
-- 배열 길이/순서를 반드시 지킬 것.
-- 빈 요소 제거.
-- 마크다운/설명/주석 없이 오직 JSON만 출력.
-
-입력:
-<<<SCRIPT
-{script_text}
-SCRIPT>>>
-"""
-
-    raw = _complete_with_any_llm(prompt)
-    lines = json.loads(raw)
-
-    if not isinstance(lines, list):
-        raise ValueError("❌ 분절 결과가 list가 아님")
-    return [ln.strip() for ln in lines if isinstance(ln, str) and ln.strip()]
     
-def convert_lines_to_ssml_batch(lines: List[str]) -> List[str]:
-    """
-    라인 배열 전체를 LLM에 한 번만 넣고,
-    동일 길이의 SSML 배열(JSON)로 반환받는다.
-    """
-    if not lines:
-        return []
-
-    prompt = f"""
-{SSML_PROMPT}
-
-[입력/출력 규칙]
-- 입력은 JSON 배열 lines: ["문장1","문장2",...]
-- 출력은 JSON 배열 ssml_list: ["<speak>...</speak>", ...]
-- 배열 길이와 순서를 반드시 동일하게 유지할 것
-- 마크다운/설명/주석 금지, 오직 JSON만 출력
-
-입력(JSON):
-{json.dumps({"lines": lines}, ensure_ascii=False)}
-"""
-
-    raw = _complete_with_any_llm(prompt)
-    ssml_list = json.loads(raw)
-
-    if not isinstance(ssml_list, list):
-        raise ValueError("❌ SSML 변환 결과가 list가 아님")
-    if len(ssml_list) != len(lines):
-        raise ValueError(f"❌ 길이 불일치: 입력={len(lines)} vs 출력={len(ssml_list)}")
-
-    return ssml_list
-    
-
 def _looks_english(text: str) -> bool:
     if not text: return False
     en = len(re.findall(r"[A-Za-z]", text))
@@ -192,6 +125,12 @@ BREATH_PROMPT = """역할: 너는 한국어 대본의 호흡(브레스) 라인�
 예) 지구에서 생명체는 살아남을수 없습니다 ← 한 줄 유지.
 
 명사구/조사 단위: 명사구 내부나 조사 바로 앞·뒤에서 어색하게 끊지 않는다.
+
+[입력]
+{{TEXT}}
+
+[출력]
+라인브레이크가 적용된 텍스트만 출력. 맨 앞·뒤 불필요한 빈 줄 금지.
 """
 
 SSML_PROMPT = """역할: 너는 한국어 대본을 숏폼용 Amazon Polly SSML로 변환하는 변환기다.
@@ -235,6 +174,12 @@ SSML_PROMPT = """역할: 너는 한국어 대본을 숏폼용 Amazon Polly SSML�
 - 각 문장의 마지막 prosody 텍스트가 원문 마지막 어미와 ‘완전히 동일’한가?
 - 재작성/치환/어미 변경 없이 원문 부분문자열로만 구성했는가?
 - 물음표/쉼표 외의 마침표/느낌표/줄임표를 쓰지 않았는가?
+
+[입력 대본]
+{{USER_SCRIPT}}
+
+[출력]
+(SSML만 출력)
 """
 
 def _complete_with_any_llm(prompt: str) -> str | None:
