@@ -1023,43 +1023,38 @@ def split_script_to_lines(script_text: str, mode="llm") -> list[str]:
 def generate_subtitle_from_script(
     script_text: str,
     ass_path: str,
-    full_audio_file_path: str,
     provider: str = "polly",
     template: str = "default",
-    polly_voice_key: str = "default_male",
+    polly_voice_key: str = "korean_female1",
     subtitle_lang: str = "ko",
     translate_only_if_english: bool = False,
-    tts_lang: str | None = None,
-    split_mode = "llm",  # 더 이상 사용하지 않지만, 기존 시그니처 호환 용
     strip_trailing_punct_last: bool = True,
 ):
     """
-    변경점:
-    - LLM 라인별 호출 제거.
-    - 전체 대본 → (1) 분절 라인 배열(LLM 1회)
-               → (2) SSML 배열(LLM 1회)
-               → (3) 라인별 TTS(LLM 아님) → 병합
-    - 반환: segments_base(list[{start,end,text,ssml,pitch}]), audio_clips(None), ass_path
+    영상용 세그먼트 + SSML + 자막 생성 (LLM 3회 호출 구조)
+    - (1) 전체 대본을 LLM에 넣어 1차 분절 라인 배열(JSON) 생성
+    - (2) 전체 라인 배열을 한 번에 LLM에 넣어 SSML 배열(JSON) 생성
+    - (3) 줄별 오디오 파일 생성 (TTS API 호출, LLM 사용 없음)
+    - (4) 각 줄 원문은 자막 text, SSML은 음성 합성에 사용
     """
 
-    # --- 1) 전체 대본 → 분절 라인 배열(LLM 1회)
+    # 1) 전체 대본 → 분절 라인 배열
     base_lines = breath_linebreaks_batch(script_text or "")
-    base_lines = [ln for ln in base_lines if ln.strip()]
+    base_lines = [ln.strip() for ln in base_lines if ln.strip()]
     if not base_lines:
         return [], None, ass_path
 
-    # --- 2) SSML 변환(LLM 1회) : 원문 보존 + 한영 보정(koreanize_if_english)
-    #      라인 텍스트 자체는 바꾸지 않고, SSML 입력 텍스트만 보정
+    # 2) SSML 변환 (배치 1회 호출, 원문은 그대로 보존, 발화용만 변환)
     ssml_input_lines = [koreanize_if_english(ln) for ln in base_lines]
     ssml_list = convert_lines_to_ssml_batch(ssml_input_lines)
 
-    # --- 3) SSML 가드(원문 불일치/중복 방지 + SSML 유효성 보정)
+    # 안전성 보정
     safe_ssml_list = []
     for orig, frag in zip(base_lines, ssml_list):
-        frag2, forced = _ssml_safe_or_fallback(orig, frag)  # 원문 보존 검사
-        safe_ssml_list.append(_validate_ssml(frag2))        # 태그/속성/연속 break 보정
+        frag2, forced = _ssml_safe_or_fallback(orig, frag)
+        safe_ssml_list.append(_validate_ssml(frag2))
 
-    # Polly 엔진 사용 시 <speak> 래핑 보장
+    # Polly 엔진이면 SSML 래핑 보장
     if provider.lower() == "polly":
         tmp = []
         for s in safe_ssml_list:
@@ -1069,41 +1064,55 @@ def generate_subtitle_from_script(
             tmp.append(t)
         safe_ssml_list = tmp
 
-    # --- 4) 라인별 TTS(LLM 아님) → 오디오 병합
+    # 3) 줄별 TTS 생성 (LLM 사용 없음)
     audio_paths = generate_tts_per_line(
-        safe_ssml_list, provider=provider, template=template, polly_voice_key=polly_voice_key
+        safe_ssml_list,
+        provider=provider,
+        template=template,
+        polly_voice_key=polly_voice_key,
     )
     if not audio_paths:
         return [], None, ass_path
 
+    # 4) 오디오 길이 기반으로 세그먼트 생성
     segments_raw = merge_audio_files(audio_paths, full_audio_file_path)
-    # segments_raw: [{"start":..., "end":...}, ...]
-
-    # --- 5) base 세그먼트 구성 (라인:오디오 1:1 매핑)
     n = min(len(segments_raw), len(base_lines), len(safe_ssml_list))
+
     if n != len(segments_raw):
         try:
             import streamlit as st
-            st.warning(f"TTS 세그먼트 수 불일치: audio={len(segments_raw)} base={len(base_lines)} → {n}로 맞춤")
+            st.warning(f"⚠️ 세그먼트/라인/SSML 개수 불일치: audio={len(segments_raw)} base={len(base_lines)} ssml={len(safe_ssml_list)} → {n}로 맞춤")
         except Exception:
-            print(f"[warn] 세그먼트 수 불일치: audio={len(segments_raw)} base={len(base_lines)} → {n}")
+            print(f"[warn] 세그먼트/라인/SSML 개수 불일치: audio={len(segments_raw)} base={len(base_lines)} ssml={len(safe_ssml_list)} → {n}")
 
     segments_base = []
     for i in range(n):
         s = segments_raw[i]
-        line_text = base_lines[i]
-        ssml_meta  = safe_ssml_list[i]
-        pitch_sum  = _summarize_line_pitch(ssml_meta)
+        orig_text = base_lines[i]       # ✅ 자막용: 원문 유지 (예: "365km")
+        ssml_text = safe_ssml_list[i]   # ✅ 발화용: 변환된 SSML (예: "<speak>삼백육십오킬로미터</speak>")
+        pitch_sum = _summarize_line_pitch(ssml_text)
+
         segments_base.append({
             "start": float(s["start"]),
             "end":   float(s["end"]),
-            "text":  re.sub(r"\s+", " ", line_text).strip(),
-            "ssml":  ssml_meta,
+            "text":  re.sub(r"\s+", " ", orig_text).strip(),  # 자막은 원문 그대로
+            "ssml":  ssml_text,                               # 음성합성은 SSML 사용
             "pitch": pitch_sum,
         })
 
-    # 여기서는 ASS 생성/자막 분해를 하지 않는다(메인에서 처리)
-    return segments_base, None, ass_path
+    # 5) ASS 자막 생성
+    try:
+        events = _quantize_segments(segments_base, fps=24.0)
+        ass_path = generate_ass_subtitle(events, ass_path, template, strip_trailing_punct_last)
+    except Exception as e:
+        try:
+            import streamlit as st
+            st.error(f"❌ ASS 생성 중 오류: {e}")
+        except Exception:
+            print(f"[error] ASS 생성 중 오류: {e}")
+
+    return segments_base, audio_paths, ass_path
+
 
 # === Auto-paced subtitle densifier (자연스러운 문맥 분할 우선) ===
 def _auto_split_for_tempo(text: str, tempo: str = "fast"):
