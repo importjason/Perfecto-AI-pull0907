@@ -10,6 +10,17 @@ import streamlit as st
 # Imports (배치 함수 & 파이프라인들)
 # -------------------------------
 
+from ssml_converter import (
+    convert_lines_to_ssml_batch,
+    breath_linebreaks_batch,
+    koreanize_if_english,
+)
+from generate_timed_segments import (
+    generate_subtitle_from_script,
+    generate_ass_subtitle,
+    SUBTITLE_TEMPLATES,
+)
+
 from keyword_generator import generate_image_keywords_per_line_batch  # 이미지 키워드 배치(1회)
 from image_generator import generate_images_for_topic, generate_videos_for_topic
 from video_maker import create_video_with_segments
