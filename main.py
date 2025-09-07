@@ -19,8 +19,7 @@ from video_maker import (
     add_subtitles_to_video,
     create_dark_text_video
 )
-from ssml_converter import convert_lines_to_ssml_batch, breath_linebreaks_batch, koreanize_if_english
-from deep_translator import GoogleTranslator
+from ssml_converter import convert_lines_to_ssml_batch, breath_linebreaks_batch
 from file_handler import get_documents_from_files
 from upload import upload_to_youtube
 from best_subtitle_extractor import load_best_subtitles_documents
@@ -32,7 +31,8 @@ import re
 import json
 import hashlib as _hl
 import pandas as pd
-from io import BytesIO
+from io import BytesIO, StringIO
+import importlib
 import nest_asyncio
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
@@ -47,13 +47,11 @@ VIDEO_TEMPLATE = "영상(영어보이스+한국어자막·가운데)"
 DEFAULT_BGM = "assets/[BGM] 힙합 비트 신나는 음악  무료브금  HYP-Show Me - HYP MUSIC - BGM Design.mp3"
 
 # ---------- 유틸 ----------
-def _split_script_for_tts(script_text: str) -> list[str]:
-    """
-    전체 대본을 LLM에 한 번 전달해 분절된 라인 배열을 받아온다.
-    """
+def _split_script_into_sentences(script_text: str) -> list[str]:
+    """구두점 기준 문장 분할 (LLM 사용 없음)"""
     text = script_text or ""
-    lines = breath_linebreaks_batch(text)  # ✅ 배치용 함수 사용
-    return [ln.strip() for ln in lines if ln.strip()]
+    parts = re.split(r"(?<=[.!?])\s+", text.strip())
+    return [p.strip() for p in parts if p.strip()]
 
 
 # === 기존 build_ssml_log_file 대체 ===
@@ -105,16 +103,15 @@ def build_ssml_log_file(
     csv_bytes = sbuf.getvalue().encode("utf-8-sig")
     return csv_bytes, "csv", "text/csv"
 
-def _log_ssml_preview(line: str, provider: str, voice_template: str, polly_voice_key: str, subtitle_lang: str):
+def _log_ssml_preview(line: str, provider: str, voice_template: str, polly_voice_key: str):
     """
     단일 라인 SSML 미리보기 로그.
     - 자막용 텍스트(line)는 원문 그대로 출력.
-    - 발화용은 koreanize_if_english(line) 후 SSML 변환.
+    - 발화용은 SSML 변환만 수행.
     """
     try:
         orig_text = line.strip()
-        ssml_input = koreanize_if_english(orig_text)  # 음성용 변환
-        ssml_list = convert_lines_to_ssml_batch([ssml_input])
+        ssml_list = convert_lines_to_ssml_batch([orig_text])
         ssml = ssml_list[0] if ssml_list else ""
         st.write(f"🧪 [SSML 미리보기] {orig_text}")  # ✅ 자막은 원문 그대로
         st.code(ssml, language="xml")               # ✅ SSML은 발화용
@@ -196,7 +193,6 @@ def build_sentence_video_segments(sentence_segments, dense_events, audio_path=No
 
     return out_sorted
 
-import hashlib, os
 
 def _fingerprint_video(path: str) -> str:
     """
@@ -850,14 +846,10 @@ def get_scene_keywords_batch(sentence_units, persona_text: str):
         if 0 <= idx < len(out):
             out[idx] = _normalize_scene_query(m.group(2))
 
-    # 비어 있는 건 문장 원문을 영어로 번역해서 폴백
+    # 비어 있는 항목은 원문 그대로 정리
     for i, val in enumerate(out):
         if not val:
-            try:
-                t = GoogleTranslator(source='auto', target='en').translate(sentence_units[i])
-            except Exception:
-                t = sentence_units[i]
-            out[i] = _normalize_scene_query(t)
+            out[i] = _normalize_scene_query(sentence_units[i])
 
     return out
 
@@ -1171,6 +1163,10 @@ with st.sidebar:
                 st.error("영상 제목이 비어있습니다.")
                 st.stop()
 
+            # ✅ 사전 분절: 전체 대본 → 라인 배열 (LLM 1회 호출)
+            sentence_lines = _split_script_into_sentences(final_script_for_video)
+            clause_lines = breath_linebreaks_batch(final_script_for_video)
+
             with st.spinner("✨ 영상 제작 중입니다..."):
                 try:
                     media_query_final = ""
@@ -1187,25 +1183,26 @@ with st.sidebar:
                         audio_path = os.path.join(audio_output_dir, "generated_audio.mp3")
 
                         st.write("🗣️ 라인별 TTS 생성/병합 및 세그먼트 산출 중...")
-                        provider = "elevenlabs" if st.session_state.selected_tts_provider == "ElevenLabs" else "polly"
-                        tmpl = st.session_state.selected_tts_template if provider == "elevenlabs" else st.session_state.selected_polly_voice_key
-                        
-                        script_text = koreanize_if_english(final_script_for_video)
-                        script_text_for_tts = "\n".join(sentence_lines)
-                        
+                        tts_provider = "elevenlabs" if st.session_state.selected_tts_provider == "ElevenLabs" else "polly"
+                        voice_template = (
+                            st.session_state.selected_tts_template
+                            if tts_provider == "elevenlabs"
+                            else st.session_state.selected_polly_voice_key
+                        )
+                        polly_voice_key = st.session_state.selected_polly_voice_key
+
                         # ✅ 토큰 없이 로그 만들 수 있도록 세션에 저장
-                        st.session_state["_orig_lines_for_tts"] = sentence_lines[:]   # 원문 라인(브레스 결과)
-                        st.session_state["_used_br_lines"]      = sentence_lines[:]   # 브레스 라인 그대로
-                        
+                        st.session_state["_orig_lines_for_tts"] = clause_lines[:]
+                        st.session_state["_used_br_lines"]      = clause_lines[:]
+
                         segments, audio_clips, ass_path = generate_subtitle_from_script(
-                            script_text,
+                            final_script_for_video,
                             ass_path,
                             provider=tts_provider,
                             template=voice_template,
                             polly_voice_key=polly_voice_key,
-                            subtitle_lang=subtitle_lang,
-                            translate_only_if_english=translate_only_if_english,
-                            strip_trailing_punct_last=True
+                            strip_trailing_punct_last=True,
+                            pre_split_lines=clause_lines,
                         )
 
                         # === SSML 변환 '후' (실사용본) ===

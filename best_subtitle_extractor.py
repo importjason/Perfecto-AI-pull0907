@@ -4,7 +4,6 @@ import whisper
 import subprocess
 import unicodedata
 import streamlit as st
-from deep_translator import GoogleTranslator
 from googleapiclient.discovery import build
 from yt_dlp import YoutubeDL
 from langchain_core.documents import Document as LangChainDocument
@@ -74,15 +73,8 @@ def resolve_channel_id(input_str):
 # 📝 [파일명 변환, 오디오 다운로드 등]
 # ===============================
 def safe_filename(title):
-    """한글 제목이면 영어로 번역해서 안전한 파일명 생성"""
-    if any('\uac00' <= c <= '\ud7a3' for c in title):
-        try:
-            translated = GoogleTranslator(source='ko', target='en').translate(title)
-        except Exception:
-            translated = title
-    else:
-        translated = title
-    safe_title = unicodedata.normalize("NFKD", translated)
+    """한글 포함 여부와 관계없이 안전한 파일명 생성"""
+    safe_title = unicodedata.normalize("NFKD", title)
     safe_title = safe_title.encode("ascii", "ignore").decode("ascii")
     safe_title = re.sub(r'[\\/*?:"<>|#;]', "", safe_title)
     safe_title = safe_title.strip().replace(" ", "_")

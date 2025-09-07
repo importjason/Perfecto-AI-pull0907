@@ -1,13 +1,11 @@
 
-from deep_translator import GoogleTranslator
-from ssml_converter import convert_lines_to_ssml_batch, breath_linebreaks_batch, koreanize_if_english
+from ssml_converter import convert_lines_to_ssml_batch, breath_linebreaks_batch
 from html import escape as _xml_escape
 # generate_timed_segments.py
 import os
 import re, math
 from elevenlabs_tts import generate_tts
 from pydub import AudioSegment
-import kss
 import boto3, json
 from elevenlabs_tts import TTS_POLLY_VOICES 
 from botocore.exceptions import ClientError
@@ -459,33 +457,6 @@ SUBTITLE_TEMPLATES = {
     }
 }
 
-def _looks_english(text: str) -> bool:
-    # 매우 단순한 휴리스틱: 알파벳이 한글보다 확실히 많으면 영어로 간주
-    letters = len(re.findall(r'[A-Za-z]', text))
-    hangul = len(re.findall(r'[\uac00-\ud7a3]', text))
-    return letters >= max(3, hangul * 2)
-
-def _detect_script_language(lines):
-    eng = sum(_looks_english(x) for x in lines)
-    kor = sum(bool(re.search(r'[\uac00-\ud7a3]', x)) for x in lines)
-    return 'en' if eng > kor else 'ko'
-
-def _maybe_translate_lines(lines, target='ko', only_if_src_is_english=True):
-    if not lines:
-        return lines
-    try:
-        src = _detect_script_language(lines)
-        if only_if_src_is_english and src != 'en':
-            # 원문이 영어가 아닐 때는 건드리지 않음
-            return lines
-        if target is None or target == src:
-            return lines
-        tr = GoogleTranslator(source='auto', target=target)
-        return [tr.translate(l) if l.strip() else l for l in lines]
-    except Exception:
-        # 번역 실패 시 원문 유지 (크래시 방지)
-        return lines
-
 def _validate_ssml(text: str) -> str:
     """
     Polly 호출 전 SSML 안전성 검사 및 보정
@@ -923,7 +894,7 @@ def generate_ass_subtitle(
             t = one or ""
             if strip_trailing_punct_last:
                 t = _strip_last_punct_preserve_closers(t)
-            t = _drop_special_keep_units(t)  # '?', %, °, ℃, °C, °F, km/h, ㎦ 등 단위 보존
+            t = _drop_special_except_q(t)
             t = _sanitize_ass_text_for_dialog(t)
             return t
 
@@ -967,45 +938,12 @@ def format_ass_timestamp(seconds):
     cs = int((seconds - int(seconds)) * 100)
     return f"{h:01}:{m:02}:{s:02}.{cs:02}"
 
-def _drop_special_keep_units(s: str) -> str:
-    """
-    자막 텍스트에서 장식성 특수문자를 지우되,
-    숫자/단위/질의부호는 보존:
-    - 보존: 한글/영문/숫자/공백/NBSP, 물음표(?),
-            %, °, ℃, ℉, '°C','°F', 슬래시(/),
-            CJK 호환 단위(㎞, ㎦, ㎥ 등 U+3300~U+33FF)
-    - 소수점은 '숫자.숫자' 안에서만 보존
-    - 그 외 기호(따옴표, 마침표, 콜론, 세미콜론 등) 제거
-    """
-    NBSP = "\u00A0"
-    if not s:
-        return s
-
-    # 소수점 보호
-    s = re.sub(r'(?<=\d)\.(?=\d)', '§DECIMAL§', s)
-
-    # '°C' / '°F'는 그대로 둠
-    s = s.replace("°C", "°C").replace("°F", "°F")
-
-    # 허용 문자 외 제거
-    allowed = r"[A-Za-z\uAC00-\uD7A30-9 \t" + NBSP + r"\?%°/℃℉\u3300-\u33FF]"
-    s = re.sub(rf"[^{allowed}]+", "", s)
-
-    # 보호 소수점 복원
-    s = s.replace('§DECIMAL§', '.')
-
-    # 콤마는 숫자 사이가 아니면 제거(원하시면 전부 제거해도 무방)
-    s = re.sub(r'(?<!\d),(?!\d)', '', s)
-
-    # 앞뒤 공백 정리
-    return re.sub(r"\s{2,}", " ", s).strip()
-
 def split_script_to_lines(script_text: str, mode="llm") -> list[str]:
     text = (script_text or "").strip()
     if not text:
         return []
 
-    # ✨ 개행이 있으면 우선 하드 경계로 쪼갬
+    # 개행 기준 강제 분할
     if "\n" in text:
         base_lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     else:
@@ -1014,11 +952,10 @@ def split_script_to_lines(script_text: str, mode="llm") -> list[str]:
     if mode == "newline":
         return base_lines
 
-    # mode == "llm": 각 줄을 breath_linebreaks에 넣되, honor_newlines=True로 추가 분절 방지
-    out = []
-    for line in base_lines:
-        out.extend(breath_linebreaks(line, honor_newlines=True))
-    return out
+    # mode == "llm": 전체 대본을 한 번에 LLM에 전달해 분절 라인 배열 반환
+    joined = "\n".join(base_lines)
+    lines = breath_linebreaks_batch(joined)
+    return [ln.strip() for ln in lines if ln.strip()]
 
 # --- 변경 2: generate_subtitle_from_script 시그니처/로직 확장 ---
 def generate_subtitle_from_script(
@@ -1027,27 +964,29 @@ def generate_subtitle_from_script(
     provider: str = "polly",
     template: str = "default",
     polly_voice_key: str = "korean_female1",
-    subtitle_lang: str = "ko",
-    translate_only_if_english: bool = False,
     strip_trailing_punct_last: bool = True,
+    pre_split_lines: list[str] | None = None,
 ):
     """
-    영상용 세그먼트 + SSML + 자막 생성 (LLM 3회 호출 구조)
+    영상용 세그먼트 + SSML + 자막 생성 (LLM 최대 2회 호출 구조)
     - (1) 전체 대본을 LLM에 넣어 1차 분절 라인 배열(JSON) 생성
+      * 단, `pre_split_lines`가 제공되면 이 과정을 생략하고 전달된 라인을 사용
     - (2) 전체 라인 배열을 한 번에 LLM에 넣어 SSML 배열(JSON) 생성
     - (3) 줄별 오디오 파일 생성 (TTS API 호출, LLM 사용 없음)
     - (4) 각 줄 원문은 자막 text, SSML은 음성 합성에 사용
     """
 
     # 1) 전체 대본 → 분절 라인 배열
-    base_lines = breath_linebreaks_batch(script_text or "")
-    base_lines = [ln.strip() for ln in base_lines if ln.strip()]
+    if pre_split_lines is not None:
+        base_lines = [ln.strip() for ln in pre_split_lines if ln.strip()]
+    else:
+        base_lines = breath_linebreaks_batch(script_text or "")
+        base_lines = [ln.strip() for ln in base_lines if ln.strip()]
     if not base_lines:
         return [], None, ass_path
 
     # 2) SSML 변환 (배치 1회 호출, 원문은 그대로 보존, 발화용만 변환)
-    ssml_input_lines = [koreanize_if_english(ln) for ln in base_lines]
-    ssml_list = convert_lines_to_ssml_batch(ssml_input_lines)
+    ssml_list = convert_lines_to_ssml_batch(base_lines)
 
     # 안전성 보정
     safe_ssml_list = []

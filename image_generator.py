@@ -9,28 +9,14 @@ load_dotenv()
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 
 # === Add: English-enforcer ===
-import re
 from functools import lru_cache
-try:
-    from deep_translator import GoogleTranslator
-except Exception:
-    GoogleTranslator = None
 
 @lru_cache(maxsize=1024)
 def _ensure_english(text: str) -> str:
     t = (text or "").strip()
     if not t:
         return t
-    # 이미 영문/숫자/기본 기호만 있으면 그대로
-    if re.fullmatch(r"[A-Za-z0-9 ,./°%-]+", t):
-        return t
-    # deep_translator 사용 가능 시 자동 번역
-    if GoogleTranslator is not None:
-        try:
-            return GoogleTranslator(source="auto", target="en").translate(t) or t
-        except Exception:
-            pass
-    return t  # 실패 시 원문 유지
+    return t
 
 # ===== Global throttle & cache =====
 # 연속 호출 사이 최소 간격(초). 300~500ms 권장.
