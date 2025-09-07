@@ -1,94 +1,80 @@
-# elevenlabs_tts.py — FINAL
-
+from langchain_core.documents import Document as LangChainDocument
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnableMap, RunnableLambda, RunnablePassthrough
+#from langchain_groq import ChatGroq  # ✅ Groq import
+from langchain_openai import ChatOpenAI
 import os
-from typing import List
-
-# ======================
-# Config: 음성 템플릿/보이스
-# ======================
-
-# ElevenLabs용 템플릿 (예시)
-TTS_ELEVENLABS_TEMPLATES = {
-    "default": {"voice": "Rachel", "stability": 0.4, "similarity_boost": 0.8},
-    "soft": {"voice": "Bella", "stability": 0.6, "similarity_boost": 0.9},
-    "fast": {"voice": "Elli", "stability": 0.3, "similarity_boost": 0.7},
-}
-
-# Polly 보이스 맵 (예시)
-TTS_POLLY_VOICES = {
-    "default_male": {"voice_id": "Seoyeon", "lang": "ko-KR"},
-    "korean_female1": {"voice_id": "Seoyeon", "lang": "ko-KR"},
-    "korean_male1": {"voice_id": "Takumi", "lang": "ja-JP"},  # 필요에 맞게 수정
-}
 
 
-# ======================
-# 실제 합성 함수 (stub)
-# ======================
 
-def synthesize_with_polly(ssml: str, out_path: str, polly_voice_key: str = "korean_female1"):
+def get_conversational_rag_chain(retriever, system_prompt):
     """
-    AWS Polly로 SSML 합성.
-    실제 구현은 boto3 사용 (Polly client.synthesize_speech).
+    최종적으로 생성된 문장 단위의 출처를 사용하여 답변을 생성하는 RAG 체인을 구성합니다.
     """
-    try:
-        # TODO: boto3 Polly client 연결
-        # 현재는 더미 파일 생성
-        with open(out_path, "wb") as f:
-            f.write(b"")  # 빈 파일 placeholder
-        print(f"[Polly] Generated TTS: {out_path} ({polly_voice_key})")
-    except Exception as e:
-        print(f"[error] Polly TTS 실패: {e}")
-        raise
+    llm = ChatOpenAI(
+        model="gpt-5",        # 🔑 nano 모델
+        temperature=0.1,
+        api_key=os.getenv("OPENAI_API_KEY")
+    )
+    
+    rag_prompt_template = f"""{system_prompt}
 
+Answer the user's request based *only* on the provided "Context".
+If the context does not contain the answer, say you don't know.
+Do not use any prior knowledge.
 
-def synthesize_with_elevenlabs(ssml: str, out_path: str, voice_template: str = "default"):
-    """
-    ElevenLabs API로 SSML 합성.
-    실제 구현은 requests.post(...) 호출.
-    """
-    try:
-        # TODO: ElevenLabs API 호출 코드
-        # 현재는 더미 파일 생성
-        with open(out_path, "wb") as f:
-            f.write(b"")  # 빈 파일 placeholder
-        print(f"[11Labs] Generated TTS: {out_path} ({voice_template})")
-    except Exception as e:
-        print(f"[error] ElevenLabs TTS 실패: {e}")
-        raise
+**Context:**
+{{context}}
 
+**User's Request:**
+{{input}}
 
-# ======================
-# Main API
-# ======================
+**Answer (in Korean):**
+"""
+    rag_prompt = ChatPromptTemplate.from_template(rag_prompt_template)
+    
+    def format_docs_with_metadata(docs: list[LangChainDocument]) -> str:
+        """문서 리스트를 LLM 프롬프트 형식에 맞게 변환합니다."""
+        if not docs:
+            return "No context provided."
+        
+        sources = {}
+        for doc in docs:
+            source_url = doc.metadata.get("source", "Unknown Source")
+            title = doc.metadata.get("title", "No Title")
+            key = (source_url, title)
+            if key not in sources:
+                sources[key] = []
+            sources[key].append(doc.page_content)
 
-def generate_tts_per_line(
-    ssml_list: List[str],
-    provider: str = "polly",
-    template: str = "default",
-    polly_voice_key: str = "korean_female1",
-) -> List[str]:
-    """
-    주어진 SSML 문자열 리스트를 줄 단위로 음성 파일 생성.
-    - provider: "polly" | "elevenlabs"
-    - 반환: 생성된 오디오 파일 경로 리스트
-    """
-    if not ssml_list:
-        return []
+        formatted_string = ""
+        for (source_url, title), sentences in sources.items():
+            formatted_string += f"\n--- Source: {title} ({source_url}) ---\n"
+            formatted_string += "\n".join(f"- {s}" for s in sentences)
 
-    audio_paths: List[str] = []
-    os.makedirs("assets/auto/tts_lines", exist_ok=True)
+        return formatted_string.strip()
 
-    for i, ssml in enumerate(ssml_list):
-        out_path = os.path.join("assets", "auto", "tts_lines", f"line_{i:03d}.mp3")
-        try:
-            if provider.lower() == "polly":
-                synthesize_with_polly(ssml, out_path, polly_voice_key=polly_voice_key)
-            else:
-                synthesize_with_elevenlabs(ssml, out_path, voice_template=template)
-            audio_paths.append(out_path)
-        except Exception as e:
-            print(f"[warn] line {i} TTS 실패: {e}")
-            audio_paths.append("")  # 실패 시 빈 문자열로 채움
+    rag_chain = RunnableMap({
+        "answer": (
+            {"context": retriever | RunnableLambda(format_docs_with_metadata), "input": RunnablePassthrough()}
+            | rag_prompt
+            | llm
+            | StrOutputParser()
+        ),
+        "source_documents": retriever  # 원본 문서를 그대로 반환
+    })
 
-    return audio_paths
+    return rag_chain
+
+def get_default_chain(system_prompt):
+    prompt = ChatPromptTemplate.from_messages(
+        [("system", system_prompt), ("user", "{question}")]
+    )
+    # ✅ OpenAI nano 계열 모델
+    llm = ChatOpenAI(
+        model="gpt-5",
+        temperature=0.7,
+        api_key=os.getenv("OPENAI_API_KEY")
+    )
+    return prompt | llm | StrOutputParser()
