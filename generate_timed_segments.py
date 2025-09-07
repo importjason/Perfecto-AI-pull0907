@@ -1029,18 +1029,23 @@ def generate_subtitle_from_script(
     subtitle_lang: str = "ko",
     translate_only_if_english: bool = False,
     strip_trailing_punct_last: bool = True,
+    pre_split_lines: list[str] | None = None,
 ):
     """
-    영상용 세그먼트 + SSML + 자막 생성 (LLM 3회 호출 구조)
+    영상용 세그먼트 + SSML + 자막 생성 (LLM 최대 2회 호출 구조)
     - (1) 전체 대본을 LLM에 넣어 1차 분절 라인 배열(JSON) 생성
+      * 단, `pre_split_lines`가 제공되면 이 과정을 생략하고 전달된 라인을 사용
     - (2) 전체 라인 배열을 한 번에 LLM에 넣어 SSML 배열(JSON) 생성
     - (3) 줄별 오디오 파일 생성 (TTS API 호출, LLM 사용 없음)
     - (4) 각 줄 원문은 자막 text, SSML은 음성 합성에 사용
     """
 
     # 1) 전체 대본 → 분절 라인 배열
-    base_lines = breath_linebreaks_batch(script_text or "")
-    base_lines = [ln.strip() for ln in base_lines if ln.strip()]
+    if pre_split_lines is not None:
+        base_lines = [ln.strip() for ln in pre_split_lines if ln.strip()]
+    else:
+        base_lines = breath_linebreaks_batch(script_text or "")
+        base_lines = [ln.strip() for ln in base_lines if ln.strip()]
     if not base_lines:
         return [], None, ass_path
 
