@@ -1,27 +1,133 @@
-from RAG.chain_builder import get_default_chain
-import re
-from html import escape as _xml_escape
+# ssml_converter.py — FINAL (batch-only, JSON I/O, safe)
+from __future__ import annotations
 
-try:
-    from llm_utils import complete_text  # 존재하면 활용
-except Exception:
-    complete_text = None
-
-try:
-    from deep_translator import GoogleTranslator
-except Exception:
-    GoogleTranslator = None
-
-# ssml_converter.py
 import json
+import re
 from typing import List
 
-# ⬇️ 신규: 전체 대본 → 분절 라인 배열(JSON) 1회
+# === 프로젝트 공용 LLM 호출 래퍼 ===
+#   - 모든 LLM 호출은 이 함수 1곳만 사용
+from persona import generate_response_from_persona as _llm
+
+
+# === 공용 유틸 ===
+def _complete_with_any_llm(prompt: str) -> str:
+    """
+    프로젝트 공용 LLM 호출. 반드시 문자열만 반환하도록 강제.
+    """
+    out = _llm(prompt)
+    # Streamlit / LangChain 등에서 dict가 올 수 있으므로 방어
+    if not isinstance(out, str):
+        try:
+            out = json.dumps(out, ensure_ascii=False)
+        except Exception:
+            out = str(out)
+    return out.strip()
+
+
+def _json_loads_strict(raw: str):
+    """
+    모델이 설명/마크다운을 섞는 사고 대비:
+    - 첫 번째 '[' 부터 마지막 ']' 구간만 추출하여 JSON 파싱 시도
+    - 실패 시 개행 단위로 list를 구성(임시 폴백)
+    """
+    raw = raw.strip()
+    try:
+        return json.loads(raw)
+    except Exception:
+        # 설명이 앞뒤에 섞였을 경우 bracket strip
+        l = raw.find('[')
+        r = raw.rfind(']')
+        if l != -1 and r != -1 and l < r:
+            try:
+                return json.loads(raw[l:r+1])
+            except Exception:
+                pass
+        # 최후 폴백: 줄 단위로 리스트 구성
+        return [ln.strip() for ln in raw.splitlines() if ln.strip()]
+
+
+def _has_korean(text: str) -> bool:
+    return bool(re.search(r"[가-힣]", text or ""))
+
+
+def koreanize_if_english(text: str) -> str:
+    """
+    자막은 원문 그대로 유지하고, '발화용 입력'만 이 함수를 거칩니다.
+    - 한국어가 이미 섞여 있으면 그대로 반환
+    - 전부 영문/숫자라면 SSML 쪽에서 자연 발화가 되도록 최소 치환
+      (단위 몇 개만 한글 단위로 치환: km, m, kg 등)
+    - 숫자 → 한글 숫자 표기는 LLM(SSML 변환 프롬프트)에서 처리
+    """
+    t = (text or "").strip()
+    if not t:
+        return t
+    if _has_korean(t):
+        return t
+
+    # 최소 단위 치환 (너무 과도하게 바꾸지 않는다)
+    # 예: 365km -> 365 킬로미터 (숫자 한글화는 SSML 단계에서 처리)
+    unit_map = {
+        r"\bkm\b": " 킬로미터",
+        r"\bm\b": " 미터",
+        r"\bkg\b": " 킬로그램",
+        r"\bg\b": " 그램",
+        r"\bcm\b": " 센티미터",
+        r"\bmm\b": " 밀리미터",
+        r"\bmi\b": " 마일",
+        r"\blb\b": " 파운드",
+        r"\bft\b": " 피트",
+        r"\bin\b": " 인치",
+        r"\bh\b": " 시간",
+        r"\bmin\b": " 분",
+        r"\bs\b": " 초",
+        r"\b%": " 퍼센트",
+    }
+    out = t
+    for pat, rep in unit_map.items():
+        out = re.sub(pat, rep, out, flags=re.IGNORECASE)
+
+    # 중복 공백 정리
+    out = re.sub(r"\s+", " ", out).strip()
+    return out
+
+
+# === 프롬프트 (기존 본문을 유지하면서, 배치/JSON I/O만 강제) ===
+
+# 1) 호흡/분절 프롬프트
+BREATH_PROMPT = """
+역할: 너는 한국어/다국어 대본을 숏폼 영상용 '호흡 단위'로 분절하는 편집기다.
+출력은 오직 JSON 배열(lines)만 내야 한다. 마크다운/설명/주석을 포함하지 마라.
+
+[규칙]
+- 원문 보존: 단어/어미/문장부호 변경 금지. 분절만 수행.
+- 입력의 개행(\n)은 '상위 문단 경계'로만 간주. 문단 내부에서만 호흡 분할.
+- 빈 문자열 요소를 만들지 말 것.
+- 공백 정리 외 텍스트 변형 금지.
+"""
+
+# 2) SSML 변환 프롬프트
+SSML_PROMPT = """
+역할: 너는 한국어 대본을 Amazon Polly/일반 TTS에서 안정적으로 읽히는 SSML로 변환하는 변환기다.
+출력은 오직 JSON 배열(ssml_list)만 내야 한다. 마크다운/설명/주석을 포함하지 마라.
+
+[불변 규칙]
+1) 입력 라인 수 == 출력 SSML 수 (길이와 순서 완전 동일)
+2) 각 SSML은 <speak>...</speak> 루트로 감싼다
+3) 허용 태그: <speak>, <prosody>, <break>
+4) 원문 의미를 바꾸지 말 것. 불필요한 문장 합치기/분할/재배열 금지
+5) 숫자+단위가 있으면 한국어 자연 발화가 되도록 적절히 읽히게 조정 가능
+6) 과도한 <break> 연쇄 금지(연속 2회 이상 금지), rate/volume은 과하게 조정하지 말 것
+"""
+
+
+# === 공개 API (배치 2개) ===
+
 def breath_linebreaks_batch(script_text: str) -> List[str]:
     """
     전체 대본 1개를 입력하고, LLM에서 분절된 라인 배열을 JSON으로 1회 반환.
-    - BREATH_PROMPT(기존 프롬프트 본문)는 그대로 사용하고,
-      '입/출력은 JSON 배열'만 강제한다.
+    - 출력: ["라인1", "라인2", ...]
+    - 빈 요소 제거/공백 정리 수행
     """
     text = (script_text or "").strip()
     if not text:
@@ -31,10 +137,10 @@ def breath_linebreaks_batch(script_text: str) -> List[str]:
 {BREATH_PROMPT}
 
 [입력/출력 형식(중요)]
-- 입력은 전체 대본 1개(개행 포함 가능).
+- 입력은 전체 대본 1개(개행 포함 가능)
 - 출력은 JSON 배열 lines: ["라인1","라인2",...]
 - 마크다운/설명/주석 금지. 오직 JSON만.
-- 빈 문자열 요소 금지.
+- 빈 문자열 요소 금지
 
 입력:
 <<<SCRIPT
@@ -42,24 +148,26 @@ def breath_linebreaks_batch(script_text: str) -> List[str]:
 SCRIPT>>>
 """
     raw = _complete_with_any_llm(prompt)
-    try:
-        lines = json.loads(raw)
-    except Exception:
-        # 혹시 모델이 JSON이 아닌 텍스트를 내보내면 줄 단위로 보정
-        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-    # 최종 정리
-    lines = [ln.strip() for ln in lines if isinstance(ln, str) and ln.strip()]
+    lines = _json_loads_strict(raw)
+
+    # 정리
+    if not isinstance(lines, list):
+        lines = [str(lines)]
+    lines = [str(ln).strip() for ln in lines if isinstance(ln, (str, int, float)) and str(ln).strip()]
     return lines
 
-# ⬇️ 신규: 분절 라인 배열 → SSML 배열(JSON) 1회
+
 def convert_lines_to_ssml_batch(lines: List[str]) -> List[str]:
     """
     라인 배열을 통째로 입력하고, 동일 길이의 SSML 배열(JSON)을 1회 반환.
-    - SSML_PROMPT(기존 프롬프트 본문)는 그대로 사용.
-    - 배열 길이/순서 동일성 강제.
+    - 출력: ["<speak>...<speak>", ...]
+    - 길이/순서 동일성 검증
     """
     if not lines:
         return []
+
+    # 발화용 입력(영문/숫자만인 라인은 최소 한글 단위 치환)
+    speak_inputs = [koreanize_if_english(ln) for ln in lines]
 
     prompt = f"""
 {SSML_PROMPT}
@@ -67,176 +175,27 @@ def convert_lines_to_ssml_batch(lines: List[str]) -> List[str]:
 [입력/출력 형식(중요)]
 - 입력은 JSON 배열 lines: ["라인1","라인2",...]
 - 출력은 JSON 배열 ssml_list: ["<speak>..</speak>", ...]
-- 배열 길이와 순서는 반드시 동일.
+- 배열 길이와 순서는 반드시 동일
 - 마크다운/설명/주석 금지. 오직 JSON만.
 
 입력(JSON):
-{json.dumps({"lines": lines}, ensure_ascii=False)}
+{json.dumps({"lines": speak_inputs}, ensure_ascii=False)}
 """
     raw = _complete_with_any_llm(prompt)
-    try:
-        ssml_list = json.loads(raw)
-    except Exception:
-        # 비정형 출력 대비: 줄 나눠서 받기(권장X)
-        ssml_list = [x.strip() for x in raw.split("\n") if x.strip()]
+    ssml_list = _json_loads_strict(raw)
 
     if not isinstance(ssml_list, list):
         raise ValueError("SSML 배치 결과가 JSON 배열이 아닙니다.")
     if len(ssml_list) != len(lines):
         raise AssertionError(f"SSML 배열 길이 불일치: {len(ssml_list)} != {len(lines)}")
 
-    return ssml_list
-
-def _looks_english(text: str) -> bool:
-    if not text: return False
-    en = len(re.findall(r"[A-Za-z]", text))
-    ko = len(re.findall(r"[\uac00-\ud7a3]", text))
-    return en >= 3 and en > ko * 1.2
-
-def koreanize_if_english(text: str) -> str:
-    """문장이 사실상 영어면, 의미 동일 한국어 한 문장으로 변환."""
-    t = (text or "").strip()
-    if not t or not _looks_english(t):
-        return t
-
-    # 1) LLM 시도 (의미 동일 한국어 한 문장)
-    prompt = (
-        "역할: 너는 한국어 문장 변환기다.\n"
-        "출력은 한국어 **한 문장**만. 마크다운/주석/설명 금지.\n"
-        "규칙: 의미를 100% 유지. 숫자/단위/고유명사는 보존. 문장 끝 어미는 평서체.\n\n"
-        "[입력]\n" + t + "\n\n[출력]\n"
-    )
-    try:
-        out = _complete_with_any_llm(prompt)
-        if out and out.strip():
-            # 안전 정리
-            s = re.sub(r"\s+", " ", out).strip()
-            return s
-    except Exception:
-        pass
-
-    # 2) 폴백: Google 번역
-    if GoogleTranslator is not None:
-        try:
-            return GoogleTranslator(source="auto", target="ko").translate(t)
-        except Exception:
-            pass
-
-    # 3) 실패 시 원문 유지
-    return t
-    
-def _heuristic_breath_lines(text: str, strict: bool = True) -> list[str]:
-    t = (text or "").strip()
-    if not t:
-        return []
-    if strict:
-        # ✨ LLM 실패 시엔 '추가 분절/병합' 절대 하지 않고 원문 라인 그대로 사용
-        return [t]
-
-import streamlit as st
-
-# 전역 캐시
-_BREATH_CACHE: dict[str, list[str]] = {}
-
-
-BREATH_PROMPT = """역할: 너는 한국어 대본의 호흡(브레스) 라인브레이크 편집기다.
-출력은 텍스트만, 줄바꿈으로만 호흡을 표현한다. 다른 기호·주석·설명·마크다운·태그를 절대 쓰지 않는다.
-
-[불변 규칙]
-
-원문 완전 보존: 글자·공백·숫자·단위·어미·어순을 그대로 유지한다. 줄바꿈만 추가한다.
-
-빈 줄 금지: 연속 빈 줄을 만들지 않는다(모든 줄은 실제 텍스트여야 함).
-
-한 줄 길이 가이드: 기본 3–6단어(또는 8–18글자) 권장. 지나치게 짧은 1–2단어 줄은 피한다.
-
-수치·부호 결합 유지: -173도, 1만 2천 km 같은 숫자+단위/부호는 한 줄에 붙여 둔다.
-
-문장 어미 보존: ~습니다/~합니다/~다/~이다/~것입니다/~수 없습니다 등은 앞말과 한 줄로 유지한다.
-
-질문부호: ?에서는 줄을 바꿔도 좋다(질문 뒤 새 리듬 시작).
-
-담화표지 처리 — 핵심
-
-담화표지 단독 줄 허용: 물론/따라서/즉/그러니까/그리고/그러나/하지만/한쪽으로는/다른 쪽으로는 등은 강조 목적일 때 단독 줄 가능.
-
-단, 담화표지 뒤에 아주 짧은 주어·지시어가 오면 같은 줄로 묶는다:
-예) 하지만 우리는, 그리고 우리는, 한쪽으로는 태양의, 다른 쪽으로는 태양이.
-
-보조 용언·문말 구문 유지 — 매우 중요
-
-… 수 있다/없다, … 것이다/것입니다, … 해야 한다, … 할 수 없다 등은 중간에서 끊지 말고 한 줄에 둔다.
-
-예) 지구에서 생명체는 살아남을수 없습니다 ← 한 줄 유지.
-
-명사구/조사 단위: 명사구 내부나 조사 바로 앞·뒤에서 어색하게 끊지 않는다.
-"""
-
-SSML_PROMPT = """역할: 너는 한국어 대본을 숏폼용 Amazon Polly SSML로 변환하는 변환기다.
-출력은 SSML만, <speak>…</speak> 구조로만 낸다. 마크다운/주석/설명 금지.
-
-[불변 규칙 — 반드시 지켜]
-1) 원문 보존: 단어·어순·어미(경어체/평서체) 절대 변경 금지.
-   - 각 문장의 끝 어미는 입력 그대로 유지한다. (예: "~습니다/~합니다/~이다/~다" 등)
-   - 문장 끝 어미를 다른 형태로 바꾸지 말 것.
-   - 단, 비한글 문자는 모두 자연스러운 한글로 교정한다. 수치·단위는 한국어 발음으로 표기(예: 섭씨 칠십 도, 초속 십 킬로미터, 산소 이십 퍼센트).
-   
-2) 숫자·단위 표기, 고유명사 그대로 유지.
-3) 허용 태그: <speak>, <prosody>, <break>만.
-4) 허용 문장부호: 물음표(?)와 쉼표(,)만. 마침표(.)/느낌표(!)/줄임표(…)는 출력 금지.
-5) 일시정지 규칙:
-   - 구(절) 사이: <break time="20ms"/>
-   - 문장 사이: <break time="50ms"/>
-   - 90ms 초과 금지, 20ms+50ms 연속 사용 금지(중복 브레이크 금지).
-6) 변환은 ‘분할’만 한다. 재작성·의역·어휘 치환 금지.
-   - 쉼표는 추가해도 되지만, 단어/어미는 그대로여야 한다.
-
-[억양/속도 설계]
-- 훅/질문/경고: rate 160~165%, pitch +15~+25%
-- 일반 설명/정보: rate 140~155%, pitch -10%~+5%
-- 결론/단정/무거운 문장: rate 130~140%, pitch -15%~-20%
-- 같은 문장 내 2~3개의 구(절)로 분할하고, 의미가 고조되면 뒤 구절의 rate/pitch를 최대 +5%p 상향,
-  침잠이면 최대 -5%p 하향.
-
-[끝맺음 ‘말꼬리’ 짧게 (대본 수정 없이)]
-- 문장 마지막 구절(원문 어미 그대로)에만 미세 조정:
-  그 구절을 <prosody rate="원래값+5%" pitch="+3%">…</prosody>로 감싼 뒤,
-  바로 <break time="50ms"/> 또는 다음 문장으로 넘어간다.
-- 이 조정은 어미 텍스트를 바꾸지 않고 발화만 또렷하게 만든다.
-
-[출력 형식]
-- 최상위: <speak><prosody volume="+2dB"> … </prosody></speak>
-- 각 구(절): <prosody rate="…" pitch="…">원문 일부(어미 포함, 원형 유지)</prosody>
-- 구(절) 사이는 30ms, 문장 사이는 50ms. 중복 브레이크 금지.
-
-[검증 체크리스트(내부 적용 후 통과된 경우에만 출력)]
-- <speak> 루트, 허용 태그 외 사용 없음?
-- break는 20ms/50ms만, 90ms 이하, 연속 중복 없음?
-- 각 문장의 마지막 prosody 텍스트가 원문 마지막 어미와 ‘완전히 동일’한가?
-- 재작성/치환/어미 변경 없이 원문 부분문자열로만 구성했는가?
-- 물음표/쉼표 외의 마침표/느낌표/줄임표를 쓰지 않았는가?
-"""
-
-def _complete_with_any_llm(prompt: str) -> str | None:
-    if complete_text is not None:
-        try:
-            return complete_text(prompt)
-        except Exception:
-            pass
-    try:
-        # system_prompt를 명시적으로 줌
-        chain = get_default_chain("너는 한국어 대본의 호흡(브레스) 라인브레이크 편집기다.")
-        out = chain.invoke({"question": prompt})
-        if isinstance(out, str):
-            return out
-        if isinstance(out, dict):
-            texts = [str(v) for v in out.values() if isinstance(v, (str, bytes))]
-            return max(texts, key=len) if texts else None
-    except Exception as e:
-        st.error(f"⚠️ LLM 호출 실패: {e}")
-    return None
-
-def _unwrap_speak(ssml: str) -> str:
-    m = re.search(r"<speak[^>]*>(.*)</speak>", ssml or "", flags=re.S|re.I)
-    return (m.group(1) if m else (ssml or "")).strip()
-
+    # <speak> 래핑 보장 & 기본 정리
+    out: List[str] = []
+    for s in ssml_list:
+        t = (s or "").strip()
+        if not t:
+            t = lines[len(out)]  # 비었으면 원문으로 폴백(아래에서 <speak>로 감쌈)
+        if not re.search(r"^\s*<\s*speak\b", t, flags=re.IGNORECASE):
+            t = f"<speak>{t}</speak>"
+        out.append(t)
+    return out
