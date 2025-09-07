@@ -32,7 +32,8 @@ import re
 import json
 import hashlib as _hl
 import pandas as pd
-from io import BytesIO
+from io import BytesIO, StringIO
+import importlib
 import nest_asyncio
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
@@ -196,7 +197,6 @@ def build_sentence_video_segments(sentence_segments, dense_events, audio_path=No
 
     return out_sorted
 
-import hashlib, os
 
 def _fingerprint_video(path: str) -> str:
     """
@@ -1171,6 +1171,9 @@ with st.sidebar:
                 st.error("영상 제목이 비어있습니다.")
                 st.stop()
 
+            # ✅ 사전 분절: 전체 대본 → 라인 배열 (LLM 1회 호출)
+            sentence_lines = _split_script_for_tts(final_script_for_video)
+
             with st.spinner("✨ 영상 제작 중입니다..."):
                 try:
                     media_query_final = ""
@@ -1187,25 +1190,32 @@ with st.sidebar:
                         audio_path = os.path.join(audio_output_dir, "generated_audio.mp3")
 
                         st.write("🗣️ 라인별 TTS 생성/병합 및 세그먼트 산출 중...")
-                        provider = "elevenlabs" if st.session_state.selected_tts_provider == "ElevenLabs" else "polly"
-                        tmpl = st.session_state.selected_tts_template if provider == "elevenlabs" else st.session_state.selected_polly_voice_key
-                        
-                        script_text = koreanize_if_english(final_script_for_video)
+                        tts_provider = "elevenlabs" if st.session_state.selected_tts_provider == "ElevenLabs" else "polly"
+                        voice_template = (
+                            st.session_state.selected_tts_template
+                            if tts_provider == "elevenlabs"
+                            else st.session_state.selected_polly_voice_key
+                        )
+                        polly_voice_key = st.session_state.selected_polly_voice_key
+                        subtitle_lang = st.session_state.selected_tts_lang
+                        translate_only_if_english = subtitle_lang != "ko"
+
                         script_text_for_tts = "\n".join(sentence_lines)
-                        
+
                         # ✅ 토큰 없이 로그 만들 수 있도록 세션에 저장
                         st.session_state["_orig_lines_for_tts"] = sentence_lines[:]   # 원문 라인(브레스 결과)
                         st.session_state["_used_br_lines"]      = sentence_lines[:]   # 브레스 라인 그대로
-                        
+
                         segments, audio_clips, ass_path = generate_subtitle_from_script(
-                            script_text,
+                            final_script_for_video,
                             ass_path,
                             provider=tts_provider,
                             template=voice_template,
                             polly_voice_key=polly_voice_key,
                             subtitle_lang=subtitle_lang,
                             translate_only_if_english=translate_only_if_english,
-                            strip_trailing_punct_last=True
+                            strip_trailing_punct_last=True,
+                            pre_split_lines=sentence_lines,
                         )
 
                         # === SSML 변환 '후' (실사용본) ===
